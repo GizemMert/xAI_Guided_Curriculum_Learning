@@ -7,6 +7,7 @@ from model_ViT import CurriculumVisionTransformer
 from model_CnvNext import CurriculumConvNeXt
 from curriculum_scheduler_dropout import CurriculumScheduler
 from Explainability import Explainability
+from medmnist_loader import Dataset
 import torch.nn as nn
 import wandb
 from torchmetrics import Accuracy, F1Score
@@ -34,13 +35,23 @@ def denormalize(image, mean=(0.4914, 0.4822, 0.4465), std=(0.247, 0.243, 0.261))
     image = image * std + mean
     return image.clamp(0, 1)
 
+# Denormalization function for BloodMNIST
+def denormalize_blood_organ(image, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)):
+    mean = torch.tensor(mean).view(3, 1, 1)
+    std = torch.tensor(std).view(3, 1, 1)
+    if image.dim() == 4:
+        mean = mean.unsqueeze(0)
+        std = std.unsqueeze(0)
+    image = image * std + mean
+    return image.clamp(0, 1)
+
 
 # Function to log fixed images with dropout applied
 def log_fixed_images_with_dropout(original_images, dropout_images, epoch):
     for i in range(len(original_images)):
 
-        original_image = denormalize(original_images[i].cpu().detach()).numpy().transpose(1, 2, 0)
-        dropout_image = denormalize(dropout_images[i].cpu().detach()).numpy().transpose(1, 2, 0)
+        original_image = denormalize_blood_organ(original_images[i].cpu().detach()).numpy().transpose(1, 2, 0)
+        dropout_image = denormalize_blood_organ(dropout_images[i].cpu().detach()).numpy().transpose(1, 2, 0)
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         
@@ -62,7 +73,7 @@ def log_fixed_images_with_dropout(original_images, dropout_images, epoch):
 def log_attributions(attributions, images, epoch, method_name="Attribution"):
     for i in range(len(images)):
 
-        image = denormalize(images[i].cpu().detach()).numpy().transpose(1, 2, 0)  # CHW -> HWC for RGB
+        image = denormalize_blood_organ(images[i].cpu().detach()).numpy().transpose(1, 2, 0)  # CHW -> HWC for RGB
         attribution = attributions[i].cpu().detach().numpy()
 
         if attribution.shape[0] == 3:
@@ -92,8 +103,8 @@ def main():
     # Model and dataset settings
     parser.add_argument('--model', type=str, choices=['vit', 'cnn'], default='vit',
                         help='Choose the model architecture (vit or cnn)')
-    parser.add_argument('--dataset', type=str, choices=['cifar10', 'food101'], required=True,
-                        help='Dataset to use (cifar10 or food101)')
+    parser.add_argument('--dataset', type=str, choices=['cifar10', 'food101', 'bloodmnist'], required=True,
+                        help='Dataset to use (cifar10, food101, bloodmnist)')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training and validation')
     parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
     parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate for optimizer')
@@ -127,6 +138,16 @@ def main():
     elif args.dataset == 'food101':
         num_classes = 101
         train_loader, val_loader, test_loader = load_food101(batch_size=args.batch_size)
+    elif args.dataset == 'bloodmnnist':
+        num_classes = 8
+        dataset = Dataset(batch_size=args.batch_size, name='B', image_size=28, as_rgb=True)
+        train_loader, val_loader, test_loader = dataset.train_loader, dataset.val_loader, dataset.test_loader
+
+        wandb.log({
+            "train_size": len(train_loader.dataset),
+            "val_size": len(val_loader.dataset),
+            "test_size": len(test_loader.dataset)
+        })
 
     # Select model based on user input
     if args.model == 'vit':
@@ -164,7 +185,7 @@ def main():
         return noise, inputs - noise
 
     early_stopping_counter = 0  
-    patience = 20
+    patience = 100
 
     # Select fixed images for visualization
     fixed_images, fixed_labels = [], []
@@ -194,6 +215,8 @@ def main():
 
         for batch_idx, (images, labels) in enumerate(train_loader):
             images, labels = images.to(device), labels.to(device)
+            if len(labels.shape) > 1 and labels.shape[1] > 1:
+                labels = torch.argmax(labels, dim=1)
             optimizer.zero_grad()
             """
             images.requires_grad = True
@@ -260,6 +283,8 @@ def main():
         with torch.no_grad():
             for val_images, val_labels in val_loader:
                 val_images, val_labels = val_images.to(device), val_labels.to(device)
+                if len(val_labels.shape) > 1 and val_labels.shape[1] > 1:
+                    val_labels = torch.argmax(val_labels, dim=1)
                 val_outputs = model(val_images)
 
                 # Compute accuracy and F1 score for validation
@@ -335,6 +360,8 @@ def main():
     with torch.no_grad():
         for test_images, test_labels in test_loader:
             test_images, test_labels = test_images.to(device), test_labels.to(device)
+            if len(test_labels.shape) > 1 and test_labels.shape[1] > 1:
+                test_labels = torch.argmax(test_labels, dim=1)
             test_outputs = model(test_images)
 
             # Compute accuracy and F1 score for test dataset
@@ -355,14 +382,14 @@ def main():
                 explainer_method = explainability.compute_input_x_gradient
 
             # Visualize and log attribution maps for the first few test images
-            if idx < 5:
-                for i in range(min(3, test_images.size(0))):
+            if idx < 3:
+                for i in range(min(2, test_images.size(0))):
                     experiment_name = wandb.run.name if wandb.run.name else "experiment"
                     visualize_attr_maps(test_images[i], attributions[i], args.explainer, idx=idx,
                                         experiment_name=experiment_name)
                     idx += 1
 
-            if idx >= 15:
+            if idx >= 6:
                 break
 
             # Compute and accumulate explainability metrics
