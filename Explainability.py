@@ -1,5 +1,5 @@
 import torch
-from captum.attr import IntegratedGradients, Saliency, InputXGradient, GuidedGradCam
+from captum.attr import IntegratedGradients, Saliency, InputXGradient, GuidedGradCam, DeepLift, GuidedBackprop
 from captum.metrics import infidelity, sensitivity_max
 
 class Explainability:
@@ -21,14 +21,20 @@ class Explainability:
         return attributions
 
 
+    def compute_guided_backprop(self, inputs, target):
+        """Compute Guided Backpropagation Attributions."""
+        gbp = GuidedBackprop(self.model)
+        attributions = gbp.attribute(inputs, target=target)
+        return attributions
+
+
     ### Explainability Metrics ###
 
     def calculate_sufficiency(self, inputs, attributions, retention_proportions=[0.15, 0.30, 0.50]):
+        batch_size = inputs.shape[0]
+        flattened_attributions = attributions.view(batch_size, -1)
 
-
-        batch_size, channels, height, width = inputs.shape
-        num_features = channels * height * width
-        flattened_attributions = attributions.view(batch_size, num_features)
+        num_features = flattened_attributions.shape[1]
 
         sufficiency_scores = {}
 
@@ -38,14 +44,16 @@ class Explainability:
             _, original_predictions = torch.max(original_output, dim=1)
 
         for retention_proportion in retention_proportions:
-
             k = int(retention_proportion * num_features)
+
+            # Extract top-k indices for each example in the batch
             _, topk_indices = torch.topk(flattened_attributions, k=k, dim=1, largest=True)
 
             perturbed_inputs = torch.zeros_like(inputs)
+            flattened_inputs = inputs.view(batch_size, -1)
+
             for i in range(batch_size):
-                perturbed_inputs.view(batch_size, num_features)[i, topk_indices[i]] = \
-                inputs.view(batch_size, num_features)[i, topk_indices[i]]
+                perturbed_inputs.view(batch_size, -1)[i, topk_indices[i]] = flattened_inputs[i, topk_indices[i]]
 
             print(f"Retained features: {k}/{num_features}")
 
@@ -54,10 +62,10 @@ class Explainability:
                 perturbed_output = self.model(perturbed_inputs)
                 _, perturbed_predictions = torch.max(perturbed_output, dim=1)  # Perturbed predictions
 
-            # class accuracy for perturbed predictions
+            # Class accuracy for perturbed predictions
             accuracy = (perturbed_predictions == original_predictions).float().mean().item()
 
-            # sufficiency score (accuracy) for this retention proportion
+            # Sufficiency score (accuracy) for this retention proportion
             sufficiency_scores[retention_proportion] = accuracy
 
         return sufficiency_scores
